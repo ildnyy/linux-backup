@@ -24,11 +24,9 @@ void send_file(const char *file_path, int sockfd) {
             perror("Failed to open file");
             return;
         }
-
         while ((bytes_read = fread(buffer, 1, sizeof(buffer), file)) > 0) {
             send(sockfd, buffer, bytes_read, 0);
         }
-
         fclose(file);
     }
 }
@@ -59,7 +57,6 @@ void traverse_directory_and_send_files(const char *dir_path, int sockfd) {
             perror("Failed to get file info");
             continue;
         }
-
         // If it's a directory, send the directory info and recursively traverse it
         if (S_ISDIR(info.st_mode)) {
             send_file(path,sockfd);
@@ -70,8 +67,6 @@ void traverse_directory_and_send_files(const char *dir_path, int sockfd) {
             send_file(path, sockfd);
         }
     }
-    
-    // Close the directory
     closedir(dir);
     return;
 }

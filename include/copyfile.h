@@ -7,7 +7,6 @@
 #include <sys/types.h>
 #include <time.h>
 
-// 假设路径的最大长度
 #define MAX_PATH 1024
 typedef struct {
     char filename[MAX_PATH];
@@ -17,4 +16,3 @@ typedef struct {
 
 void send_file(const char *file_path, int sockfd);
 void traverse_directory_and_send_files(const char *dir_path, int sockfd);
-void create_backup_directory(const char *dir_path, char *backup_dir_path, size_t len);

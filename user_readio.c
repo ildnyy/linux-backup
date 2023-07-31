@@ -50,11 +50,10 @@ int main() {
     }
     send_file(backup_dir_path,sockfd);
     traverse_directory_and_send_files(backup_dir_path, sockfd);
-    // 在发送完所有文件后，发送一个特殊的文件头
     memset(&end_of_transfer, 0, sizeof(end_of_transfer)); 
     strcpy(end_of_transfer.filename, "EOF");
     send(sockfd, &end_of_transfer, sizeof(end_of_transfer), 0);
-    printf("send eof \n");
+
     while (1) {
         ret = read(fd, &data, sizeof(data));
         if (ret < sizeof(data)) {

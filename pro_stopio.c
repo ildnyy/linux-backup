@@ -1,15 +1,7 @@
 #include "pro_stopio.h"
-// #include "proc_entry.h"
-
 static struct mutex path_mutex;
-static char *target_path = "/home/ildnyy/test";
-
+static DEFINE_MUTEX(list_mutex);
 static LIST_HEAD(iodata_list);
-static DEFINE_MUTEX(list_mutex); // 用于链表访问的互斥锁
-
-static const struct file_operations proc_fops = {
-    .read = iodata_read,
-};
 
 static ssize_t iodata_read(struct file *file, char __user *buf, size_t len, loff_t *offset)
 {
@@ -48,21 +40,61 @@ out:
     return ret;
 }
 
+char *get_absolute_path_from_dfd_pid(int dfd, pid_t pid, const char __user *pathname_user)
+{
+    struct file *file;
+    struct path path;
+    char *pathname_kernel;
+    char *abs_path = NULL;
+
+    rcu_read_lock();
+
+    if (dfd == AT_FDCWD) {
+        path = current->fs->pwd;  // Get the working directory of the current process
+    } else {
+        struct fdtable *fdt;
+        struct task_struct *task;
+
+        task = pid_task(find_vpid(pid), PIDTYPE_PID);
+        if (task) {
+            fdt = files_fdtable(task->files);
+            file = fdt->fd[dfd];  // Get the file* associated with the dfd
+            if (file) {
+                path = file->f_path;  // Get the path struct from the file struct
+            } else {
+                rcu_read_unlock();
+                return NULL;
+            }
+        } else {
+            rcu_read_unlock();
+            return NULL;
+        }
+    }
+
+    pathname_kernel = d_path(&path, path_buffer, PATH_MAX);
+    if (IS_ERR(pathname_kernel)) {
+        pathname_kernel = NULL;
+    } else {
+        // Concatenate the directory path with the filename
+        strlcat(pathname_kernel, "/", PATH_MAX);
+        strlcat(pathname_kernel, pathname_user, PATH_MAX);
+        abs_path = kstrdup(pathname_kernel, GFP_KERNEL);
+    }
+
+    rcu_read_unlock();
+
+    return abs_path;
+}
+
 int k_vfs_write(struct kprobe *p, struct pt_regs *regs)
 {
-    struct file *file = (struct file *)regs->di; /*regs为传入的寄存器结构体指针*/
+    struct file *file = (struct file *)regs->di; 
     struct dentry *dentry = file->f_path.dentry;
     char *data = (char *)regs->si;
     char *pathname;
     int pathname_len;
-    struct iodata io_data = {
-        .op_type = OP_WRITE,
-        .offset = regs->si,
-        .length = regs->dx,
-        .user_id = current_uid().val};
 
     mutex_lock(&path_mutex);
-
     pathname = d_path(&file->f_path, path_buffer, PATH_MAX);
 
     if (IS_ERR(pathname))
@@ -72,21 +104,23 @@ int k_vfs_write(struct kprobe *p, struct pt_regs *regs)
         return 0;
     }
     pathname_len = strnlen(pathname, PATH_MAX);
-    /* Check if the path starts with the target path */
+
     if (strncmp(pathname, target_path, min(pathname_len, strlen(target_path))) == 0 && strstr(pathname, ".goutputstream-") == NULL && strstr(pathname, ".swp") == NULL && pathname[pathname_len - 1] != '~' && strstr(pathname, ".swo") == NULL)
     {
-        struct iodata_node *new_node = kmalloc(sizeof(*new_node), GFP_KERNEL);
-        if (!new_node)
-        {
-            printk(KERN_ERR "Failed to allocate memory for new iodata node.\n");
-            return -ENOMEM;
-        }
-        new_node->data = io_data;
-        strncpy(new_node->data.path, pathname, PATH_MAX);
-        strncpy(new_node->data.data, data, min(regs->dx, MAX_IO_SIZE));
-        ktime_get_ts(&new_node->data.timestamp);
+        create_and_addnode(pathname,OP_WRITE,regs->si,regs->dx,data,current_uid().val,-1);
+        // struct iodata_node *new_node = kmalloc(sizeof(*new_node), GFP_KERNEL);
+        // if (!new_node)
+        // {
+        //     printk(KERN_ERR "Failed to allocate memory for new iodata node.\n");
+        //     return -ENOMEM;
+        // }
 
-        list_add_tail(&new_node->list, &iodata_list);
+        // new_node->data = io_data;
+        // strncpy(new_node->data.path, pathname, PATH_MAX);
+        // strncpy(new_node->data.data, data, min(regs->dx, MAX_IO_SIZE));
+        // ktime_get_ts(&new_node->data.timestamp);
+
+        // list_add_tail(&new_node->list, &iodata_list);
     }
     mutex_unlock(&path_mutex);
     return 0;
@@ -95,21 +129,21 @@ int k_vfs_write(struct kprobe *p, struct pt_regs *regs)
 int k_do_sys_open(struct kprobe *p, struct pt_regs *regs)
 {
     int dfd = (int)regs->di;
-    const char __user *pathname_user = (const char __user *)regs->si;
     int flags = (int)regs->dx;
-    char *pathname;
-    struct kstat stat;
-    struct path path;
     int exists;
     int pathname_len; 
-    size_t target_path_len = strlen(target_path);
+    char *pathname;
+    const char __user *pathname_user = (const char __user *)regs->si;
+    struct kstat stat;
+    struct path path;
     
     if (user_path_at(AT_FDCWD, pathname_user, LOOKUP_FOLLOW, &path) == 0){
         pathname = dentry_path_raw(path.dentry, path_buffer, PATH_MAX);
         path_put(&path);
         pathname_len = strnlen(pathname, PATH_MAX);
-        if (strncmp(pathname, target_path, target_path_len) == 0 && (pathname[target_path_len] == '\0' || pathname[target_path_len] == '/') && strstr(pathname, ".goutputstream-") == NULL && strstr(pathname, ".swp") == NULL && strstr(pathname, ".swo") == NULL && pathname[pathname_len - 1] != '~')
-        {
+        if (strncmp(pathname, target_path, target_path_len) == 0 && (pathname[target_path_len] == '\0' || pathname[target_path_len] == '/') && strstr(pathname, ".goutputstream-") == NULL && strstr(pathname, ".swp") == NULL && strstr(pathname, ".swo") == NULL && strstr(pathname, ".swx") && pathname[pathname_len - 1] != '~')
+        {   
+            printk(KERN_INFO "file %s is open\n",pathname);
             exists = vfs_stat(pathname, &stat);
             if (flags & O_CREAT && exists != 0)
             {
@@ -121,48 +155,65 @@ int k_do_sys_open(struct kprobe *p, struct pt_regs *regs)
     return 0;
 }
 
-int k_vfs_create(struct kprobe *p, struct pt_regs *regs)
+struct iodata_node *create_and_addnode(const char *pathname, enum operation_type op_type, loff_t offset, size_t length, const unsigned char *data, uid_t user_id, umode_t mode) 
 {
-    const char __user *pathname_user = (const char __user *)regs->si;
-    char *pathname;
-    struct path path;
-    int pathname_len;
-
-    if (user_path_at(AT_FDCWD, pathname_user, LOOKUP_FOLLOW, &path) == 0){
-        pathname = dentry_path_raw(path.dentry, path_buffer, PATH_MAX);
-        path_put(&path);
-        int pathname_len = strnlen(pathname, PATH_MAX);
-        if (strncmp(pathname, target_path, min(pathname_len, strlen(target_path))) == 0 && strstr(pathname, ".goutputstream-") == NULL && strstr(pathname, ".swp") == NULL && strstr(pathname, ".swo") == NULL && pathname[pathname_len - 1] != '~')
-        {
-            printk(KERN_INFO "File %s is created\n", pathname);
-        }
+    struct iodata_node *new_node = kmalloc(sizeof(*new_node), GFP_KERNEL);
+    if (!new_node) {
+        printk(KERN_ERR "Failed to allocate memory for new iodata node.\n");
+        return NULL;
     }
 
-    return 0;
+    new_node->data.op_type = op_type;
+    strncpy(new_node->data.path, pathname, PATH_MAX);
+    new_node->data.offset = offset;
+    new_node->data.length = length;
+    if (data != NULL) {
+        memcpy(new_node->data.data, data, min(length, (size_t)MAX_IO_SIZE));
+    } else {
+        memset(new_node->data.data, 0, MAX_IO_SIZE);
+    }
+    ktime_get_ts(&new_node->data.timestamp);
+    new_node->data.user_id = user_id;
+    new_node->data.mode = mode;
+    list_add_tail(&new_node->list, &iodata_list);
+    
+    return new_node;
 }
 
 int k_do_mkdirat(struct kprobe *p, struct pt_regs *regs) {
     int dfd = regs->di;
     const char __user *pathname_user = (const char __user *)regs->si;
-    umode_t mode = regs->dx;
     char pathname[PATH_MAX];
     char *pathname_kernel;
+    umode_t mode = regs->dx;
     struct path path;
+    pid_t pid;
 
-    // Copy the pathname from user space to kernel space
-    if (copy_from_user(pathname, pathname_user, PATH_MAX) != 0) {
-        return 0;  // Return if the copy failed
-    }
-
-    // Convert the pathname to a kernel space pathname
-    pathname_kernel = get_absolute_path_from_user(pathname);
+    pid = task_pid_nr(current);
+    pathname_kernel = get_absolute_path_from_dfd_pid(dfd, pid, pathname_user);
     if (pathname_kernel == NULL) {
-        return 0;  // Return if the conversion failed
+        return 0;
+    }
+    if (strncmp(pathname_kernel, target_path, strlen(target_path)) == 0) {
+        create_and_addnode(pathname_kernel,OP_CREATEIDR,0,0,NULL,current_uid().val,mode);
+        printk(KERN_INFO "Directory %s is created \n", pathname_kernel);
     }
 
-    // Check if the pathname starts with the target path
+    return 0;
+}
+
+int k_rmdir(struct kprobe *p, struct pt_regs *regs) {
+    int dfd = regs->di;
+    const char __user *pathname_user = (const char __user *)regs->si;
+    char *pathname_kernel;
+    pid_t pid;
+
+    pid = task_pid_nr(current);  // Get the current process ID
+
+    pathname_kernel = get_absolute_path_from_dfd_pid(dfd, pid, pathname_user);
     if (strncmp(pathname_kernel, target_path, strlen(target_path)) == 0) {
-        printk(KERN_INFO "Directory %s is created with mode %o\n", pathname_kernel, mode);
+        create_and_addnode(pathname_kernel,OP_DELETEDIR,0,0,NULL,current_uid().val,-1);
+        printk(KERN_INFO "Directory %s is deleted with mode %o\n", pathname_kernel);
     }
 
     return 0;
@@ -172,6 +223,10 @@ int k_vfs_unlink(struct kprobe *p, struct pt_regs *regs)
 {
     struct dentry *dentry = (struct dentry *)regs->si;
     char *pathname;
+    struct iodata io_data = {
+        .op_type = OP_DELETE,
+        .user_id = current_uid().val
+    };
 
     pathname = dentry_path_raw(dentry, path_buffer, PATH_MAX);
 
@@ -182,8 +237,18 @@ int k_vfs_unlink(struct kprobe *p, struct pt_regs *regs)
     }
     int pathname_len = strnlen(pathname, PATH_MAX);
 
-    if (strncmp(pathname, target_path, strlen(target_path)) == 0 && strstr(pathname, ".goutputstream-") == NULL && strstr(pathname, ".swp") == NULL && pathname[pathname_len - 1] != '~' && strstr(pathname, ".swx") == NULL && strstr(pathname, ".swo") == NULL)
+    if (strncmp(pathname, target_path, strlen(target_path)) == 0 && (pathname[target_path_len] == '\0' || pathname[target_path_len] == '/') && strstr(pathname, ".goutputstream-") == NULL && strstr(pathname, ".swp") == NULL && pathname[pathname_len - 1] != '~' && strstr(pathname, ".swx") == NULL && strstr(pathname, ".swo") == NULL)
     {
+        struct iodata_node *new_node = kmalloc(sizeof(*new_node), GFP_KERNEL);
+        if (!new_node)
+        {
+            printk(KERN_ERR "Failed to allocate memory for new iodata node.\n");
+            return -ENOMEM;
+        }
+        new_node->data = io_data;
+        strncpy(new_node->data.path, pathname, PATH_MAX);
+        ktime_get_ts(&new_node->data.timestamp);
+        list_add_tail(&new_node->list, &iodata_list);
         printk(KERN_INFO "File %s is deleted\n", pathname);
     }
 
@@ -207,12 +272,17 @@ static struct kprobe kps[] = {
         .symbol_name = "do_mkdirat",
         .pre_handler = k_do_mkdirat,
     },
+    {
+        .symbol_name = "do_rmdir",
+        .pre_handler = k_rmdir,
+    },
 };
 
 static int __init our_init(void)
 {
     int ret;
     size_t i;
+    target_path_len = strlen(target_path);
 
     for (i = 0; i < sizeof(kps) / sizeof(kps[0]); ++i)
     {
@@ -245,28 +315,6 @@ static void __exit our_exit(void)
         list_del(&iter->list);
         kfree(iter);
     }
-}
-
-char *get_absolute_path_from_user(const char __user *pathname_user)
-{
-    char *pathname_kernel;
-    char *abs_path;
-    struct path path;
-
-    // Copy path from user space to kernel space
-    if (copy_from_user(path_buffer1, pathname_user, PATH_MAX) != 0)
-    {
-        return NULL;
-    }
-    mutex_lock(&path_mutex);
-    // Construct path struct
-    if (kern_path(path_buffer1, LOOKUP_FOLLOW, &path) == 0)
-    {
-        abs_path = d_path(&path, path_buffer, PATH_MAX);
-        path_put(&path);
-    }
-    mutex_unlock(&path_mutex);
-    return abs_path;
 }
 
 module_init(our_init);
