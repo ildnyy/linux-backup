@@ -108,19 +108,6 @@ int k_vfs_write(struct kprobe *p, struct pt_regs *regs)
     if (strncmp(pathname, target_path, min(pathname_len, strlen(target_path))) == 0 && strstr(pathname, ".goutputstream-") == NULL && strstr(pathname, ".swp") == NULL && pathname[pathname_len - 1] != '~' && strstr(pathname, ".swo") == NULL)
     {
         create_and_addnode(pathname,OP_WRITE,regs->si,regs->dx,data,current_uid().val,-1);
-        // struct iodata_node *new_node = kmalloc(sizeof(*new_node), GFP_KERNEL);
-        // if (!new_node)
-        // {
-        //     printk(KERN_ERR "Failed to allocate memory for new iodata node.\n");
-        //     return -ENOMEM;
-        // }
-
-        // new_node->data = io_data;
-        // strncpy(new_node->data.path, pathname, PATH_MAX);
-        // strncpy(new_node->data.data, data, min(regs->dx, MAX_IO_SIZE));
-        // ktime_get_ts(&new_node->data.timestamp);
-
-        // list_add_tail(&new_node->list, &iodata_list);
     }
     mutex_unlock(&path_mutex);
     return 0;
@@ -128,30 +115,33 @@ int k_vfs_write(struct kprobe *p, struct pt_regs *regs)
 
 int k_do_sys_open(struct kprobe *p, struct pt_regs *regs)
 {
-    int dfd = (int)regs->di;
-    int flags = (int)regs->dx;
-    int exists;
-    int pathname_len; 
-    char *pathname;
+    int dfd = regs->di;
     const char __user *pathname_user = (const char __user *)regs->si;
-    struct kstat stat;
+    int flag = regs->dx;
+    char *pathname;
     struct path path;
-    
-    if (user_path_at(AT_FDCWD, pathname_user, LOOKUP_FOLLOW, &path) == 0){
-        pathname = dentry_path_raw(path.dentry, path_buffer, PATH_MAX);
-        path_put(&path);
-        pathname_len = strnlen(pathname, PATH_MAX);
-        if (strncmp(pathname, target_path, target_path_len) == 0 && (pathname[target_path_len] == '\0' || pathname[target_path_len] == '/') && strstr(pathname, ".goutputstream-") == NULL && strstr(pathname, ".swp") == NULL && strstr(pathname, ".swo") == NULL && strstr(pathname, ".swx") && pathname[pathname_len - 1] != '~')
-        {   
-            printk(KERN_INFO "file %s is open\n",pathname);
-            exists = vfs_stat(pathname, &stat);
-            if (flags & O_CREAT && exists != 0)
-            {
-                printk(KERN_INFO "File %s is created, flags=%d\\n", pathname, flags);
-            }
+    pid_t pid;
+    struct kstat stat;
+    umode_t mode = regs->r10;
+
+    pid = task_pid_nr(current);
+    pathname = get_absolute_path_from_dfd_pid(dfd, pid, pathname_user);
+    if (pathname == NULL) {
+        return 0;
+    }
+    int pathname_len = strnlen(pathname, PATH_MAX);
+    if (strncmp(pathname, target_path, target_path_len) == 0 && (pathname[target_path_len] == '\0' || pathname[target_path_len] == '/') && pathname[target_path_len + 1] != '/' && strstr(pathname, ".swp") == NULL && strstr(pathname, ".swx") == NULL)
+    {   
+        // pathname[pathname_len] = '\0';
+        // int exists = vfs_stat(pathname, &stat);
+        // printk(KERN_INFO "exists: %d", exists);
+        if (flag & O_CREAT)
+        {
+            create_and_addnode(pathname,OP_CREATE,0,0,NULL,current_uid().val,mode);
+            printk(KERN_INFO "File %s is created, mode=%ho \n", pathname, regs->r10);
         }
     }
-    
+
     return 0;
 }
 
@@ -196,7 +186,7 @@ int k_do_mkdirat(struct kprobe *p, struct pt_regs *regs) {
     }
     if (strncmp(pathname_kernel, target_path, strlen(target_path)) == 0) {
         create_and_addnode(pathname_kernel,OP_CREATEIDR,0,0,NULL,current_uid().val,mode);
-        printk(KERN_INFO "Directory %s is created \n", pathname_kernel);
+        printk(KERN_INFO "Directory %s is created, mode: %ho\n ", pathname_kernel,mode);
     }
 
     return 0;
@@ -239,17 +229,8 @@ int k_vfs_unlink(struct kprobe *p, struct pt_regs *regs)
 
     if (strncmp(pathname, target_path, strlen(target_path)) == 0 && (pathname[target_path_len] == '\0' || pathname[target_path_len] == '/') && strstr(pathname, ".goutputstream-") == NULL && strstr(pathname, ".swp") == NULL && pathname[pathname_len - 1] != '~' && strstr(pathname, ".swx") == NULL && strstr(pathname, ".swo") == NULL)
     {
-        struct iodata_node *new_node = kmalloc(sizeof(*new_node), GFP_KERNEL);
-        if (!new_node)
-        {
-            printk(KERN_ERR "Failed to allocate memory for new iodata node.\n");
-            return -ENOMEM;
-        }
-        new_node->data = io_data;
-        strncpy(new_node->data.path, pathname, PATH_MAX);
-        ktime_get_ts(&new_node->data.timestamp);
-        list_add_tail(&new_node->list, &iodata_list);
-        printk(KERN_INFO "File %s is deleted\n", pathname);
+        create_and_addnode(pathname,OP_DELETE,0,0,NULL,current_uid().val,-1);
+        printk(KERN_INFO "file %s is delete \n", pathname);
     }
 
     return 0;

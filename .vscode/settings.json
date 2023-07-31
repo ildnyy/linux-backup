@@ -1,5 +1,6 @@
 {
     "files.associations": {
-        "pro_stopio.h": "c"
+        "pro_stopio.h": "c",
+        "typeinfo": "c"
     }
 }

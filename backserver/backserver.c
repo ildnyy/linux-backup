@@ -31,6 +31,7 @@ struct iodata {
     unsigned char data[MAX_IO_SIZE];      // 写入的数据
     struct timespec timestamp;   // 时间戳
     uid_t user_id;               // 用户ID
+    unsigned int mode;           //权限
 };
 typedef struct {
     char filename[MAX_PATH];
@@ -45,7 +46,7 @@ int replay_io_operation(struct iodata data) {
     switch (data.op_type) {
         case OP_CREATE:
             // 创建文件
-            fd = open(data.path, O_CREAT | O_WRONLY, 0644);
+            fd = open(data.path, O_CREAT | O_WRONLY, 0755);
             if (fd == -1) {
                 perror("Failed to create file\n");
                 return 0;
@@ -54,7 +55,7 @@ int replay_io_operation(struct iodata data) {
             break;
         case OP_CREATEDIR: 
             // 创建文件夹
-            if (mkdir(data.path, 0755) == -1) {
+            if (mkdir(data.path, data.mode) == -1) {
                 perror("Failed to create directory\n");
                 return 0;
             }
