@@ -16,6 +16,8 @@ enum operation_type {
     OP_WRITE,
     OP_CREATE,
     OP_DELETE,
+    OP_CREATEDIR,
+    OP_DELETEDIR,
 };
 
 struct iodata {

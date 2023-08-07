@@ -11,6 +11,9 @@
 #include <linux/namei.h>
 #include <linux/fdtable.h>
 #include <linux/fs_struct.h>
+#include <linux/net.h>
+#include <net/sock.h>
+#include <linux/inet.h>
 
 #define PATH_MAX 256
 #define MAX_IO_SIZE 4096
@@ -23,7 +26,7 @@ enum operation_type {
     OP_WRITE,
     OP_CREATE,
     OP_DELETE,
-    OP_CREATEIDR,
+    OP_CREATEDIR,
     OP_DELETEDIR,
 };
 struct iodata {
@@ -48,6 +51,8 @@ int k_do_mkdirat(struct kprobe *p, struct pt_regs *regs);
 static ssize_t iodata_read(struct file *file, char __user *buf, size_t len, loff_t *offset);
 char *get_absolute_path_from_dfd_pid(int dfd, pid_t pid, const char __user *pathname_user);
 struct iodata_node *create_and_addnode(const char *pathname, enum operation_type op_type, loff_t offset, size_t length, const unsigned char *data, uid_t user_id, umode_t mode);
+struct iodata *create_io_data(const char *pathname, enum operation_type op_type, loff_t offset, size_t length, const unsigned char *data, uid_t user_id, umode_t mode);
+int send_msg(struct iodata *data);
 static int __init our_init(void);
 static void __exit our_exit(void);
 

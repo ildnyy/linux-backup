@@ -1,10 +1,16 @@
 #include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <sys/select.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <stdio.h>
 #include <fcntl.h>
 #include <signal.h>
-#include <sys/select.h>
+#include <time.h>
+#include <unistd.h>
+#include <string.h>
+#include <stdlib.h>
 
 #define SERVER_IP "0.0.0.0"  // 请替换为你的服务器IP地址
 #define SERVER_PORT 8800  // 请选择合适的端口号
@@ -28,7 +34,7 @@ struct iodata {
     char path[PATH_MAX];         // 文件路径
     long long offset;            // 写入的偏移量
     size_t length;               // 写入的长度
-    unsigned char data[MAX_IO_SIZE];      // 写入的数据
+    unsigned char data[MAX_IO_SIZE];      // 写入的数据   
     struct timespec timestamp;   // 时间戳
     uid_t user_id;               // 用户ID
     unsigned int mode;           //权限
@@ -101,19 +107,27 @@ int replay_io_operation(struct iodata data) {
 void rename_dir(const char *old_dir_path) {
     char new_dir_path[PATH_MAX];
     time_t now;
-    struct tm *now_tm;
     char time_str[64];
-
     // Get the current time
     now = time(NULL);
-    now_tm = localtime(&now);
-
-    // Format the time
-    strftime(time_str, sizeof(time_str), "%Y%m%d%H%M%S", now_tm);
-
-    // Construct the new directory path
+    struct tm *now_tm = localtime(&now);  
+    if (now_tm != NULL) {
+        int ret = snprintf(time_str, sizeof(time_str), "%04d%02d%02d%02d%02d%02d",
+                        now_tm->tm_year + 1900,
+                        now_tm->tm_mon + 1,
+                        now_tm->tm_mday,
+                        now_tm->tm_hour,
+                        now_tm->tm_min,
+                        now_tm->tm_sec);
+        if (ret > 0 && ret < sizeof(time_str)) {
+            printf("%s\n", time_str);
+        } else {
+            fprintf(stderr, "Failed to format time\n");
+        }
+    } else {
+        perror("Failed to get current time");
+    }
     snprintf(new_dir_path, sizeof(new_dir_path), "%s_%s", old_dir_path, time_str);
-
     // Rename the directory
     if (rename(old_dir_path, new_dir_path) != 0) {
         perror("Failed to rename directory");
@@ -125,7 +139,7 @@ ssize_t recv_all(int socket, void *buffer, size_t length) {
     ssize_t received = 0;
     while (length > 0) {
         ssize_t r = recv(socket, ptr, length, 0);
-        if (r < 1) return received > 0 ? received : r;  // r=0 indicates end of file, r=-1 is error
+        if (r < 1) return received > 0 ? received : r;  
         ptr += r;
         received += r;
         length -= r;
@@ -138,7 +152,7 @@ void ensure_directory_exists(const char *file_path) {
     char *sep = strrchr(dir_path, '/');
     if (sep != NULL) {
         *sep = '\0';
-        if (strlen(dir_path) > 0) { // Check if the directory path is not empty
+        if (strlen(dir_path) > 0) {
             ensure_directory_exists(dir_path);
             mkdir(dir_path, 0755);  // Try to create the directory. It's okay if it already exists.
         }
@@ -146,12 +160,20 @@ void ensure_directory_exists(const char *file_path) {
     free(dir_path);
 }
 
-void receive_file(int sockfd) {
+void receive_file(int sockfd, char *backup_path) {
+    static int first_receive = 1; 
     FileHeader header;
     FILE *file;
     char buffer[1024];
     size_t bytes_left, bytes_received;
     recv(sockfd, &header, sizeof(FileHeader), 0);
+
+    if (first_receive) {
+        // 第一次接收到数据，改变 backup_path 的值
+        strncpy(backup_path, header.filename, sizeof(header.filename)); 
+        printf("backup_path: %s\n",backup_path);
+        first_receive = 0;  
+    }
 
     ensure_directory_exists(header.filename);
     if (strcmp(header.filename, "EOF") == 0) {
@@ -171,17 +193,14 @@ void receive_file(int sockfd) {
             return;
         }
         bytes_left = header.file_size;
-        printf("size: %zu\n",header.file_size);
         while (bytes_left > 0) {
             bytes_received = recv(sockfd, buffer, (bytes_left < sizeof(buffer) ? bytes_left : sizeof(buffer)), 0);
-            printf("bytes_received: %d \n",bytes_received);
             if (bytes_received <= 0) {
                 perror("Failed to receive file data");
                 break;
             }
             fwrite(buffer, 1, bytes_received, file);
             bytes_left -= bytes_received;
-            printf("buffer : %s\n", buffer);
         }
         fclose(file);
     }
@@ -238,13 +257,20 @@ int main() {
     printf("Accepted connection from %s:%d\n", inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
 
     while (1) {
-        receive_file(client_sock);
+        receive_file(client_sock, backup_path);
         if (first_backup_done){
             printf("全备完成");
             break;
         }
     }
-    
+    close(client_sock);
+
+    client_sock = accept(listen_sock, (struct sockaddr *)&client_addr, &client_addr_len);
+    if (client_sock == -1) {
+        perror("Failed to accept client connection");
+    }
+
+    printf("Accepted connection from %s:%d\n", inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
     while (!quit && first_backup_done) {
         // 从客户端接收数据
         FD_ZERO(&read_fds);
@@ -253,6 +279,9 @@ int main() {
         tv.tv_usec = 0;
         int activity = select(client_sock + 1, &read_fds, NULL, NULL, &tv);
 
+        if (quit) {
+            break;
+        }
         if (activity < 0) {
             perror("select error");
         } else if (activity == 0) {
@@ -273,35 +302,15 @@ int main() {
                         printf("replay fail.\n");
                     }
                 }
-                else if(received_bytes == 0) {
-                    printf("waiting for data.\n");
-                } 
                 else if (received_bytes == -1) {
                     perror("Error receiving data.\n");
                 }
             }
         }
-        // ssize_t received_bytes = recv_all(client_sock, &data, sizeof(data));
-        // if (received_bytes == sizeof(data)) {
-        //     printf("receiving...\n");
-        //     // 处理接收到的数据
-        //     int flag = replay_io_operation(data);
-        //     if(flag){
-        //         printf("replay success\n");
-        //     }
-        //     else{
-        //         printf("replay fail\n");
-        //     }
-        // }
-        // else if(ret == 0) {
-        //     printf("Client disconnected.\n");
-        // } 
-        // else if (ret == -1) {
-        //     perror("Error receiving data");
-        // }
     }
     close(client_sock);
     close(listen_sock);
+    printf("%s\n",backup_path);
     rename_dir(backup_path);
     return 0;
 }

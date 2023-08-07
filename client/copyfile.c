@@ -16,7 +16,7 @@ void send_file(const char *file_path, int sockfd) {
 
     // Send the header first
     send(sockfd, &header, sizeof(FileHeader), 0);
-    printf("size: %d\n",header.file_size);
+    printf("size: %ld\n",header.file_size);
     // If it's a regular file, send its content
     if (!header.is_directory) {
         file = fopen(file_path, "rb");
