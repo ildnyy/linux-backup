@@ -1,8 +1,4 @@
 #include "pro_stopio.h"
-static struct mutex path_mutex;
-static DEFINE_MUTEX(list_mutex);
-static LIST_HEAD(iodata_list);
-static struct socket *sock;
 
 static ssize_t iodata_read(struct file *file, char __user *buf, size_t len, loff_t *offset)
 {
@@ -87,99 +83,96 @@ char *get_absolute_path_from_dfd_pid(int dfd, pid_t pid, const char __user *path
     return abs_path;
 }
 
-int send_msg(struct iodata *data)
-{
-    struct msghdr msg = {0};
-    struct kvec vec;
-    int ret;
-
-    // Prepare the message
-    vec.iov_base = &data;
-    vec.iov_len = sizeof(data);
-    msg.msg_flags = MSG_DONTWAIT;  // non-blocking operation
-
-    // Send the message
-    printk("send msg\n");
-    ret = kernel_sendmsg(sock, &msg, &vec, 1, vec.iov_len);
-    if (ret < 0) {
-        printk(KERN_ERR "Failed to send message, error %d\n", ret);
-    }
-    printk("send done\n");
-    return ret;
-}
-
-struct iodata *create_io_data(const char *pathname, enum operation_type op_type, loff_t offset, size_t length, const unsigned char *data, uid_t user_id, umode_t mode) 
-{
-    struct iodata *io_data = kmalloc(sizeof(struct iodata), GFP_KERNEL);
-    if (!io_data) {
-        return NULL;
-    }
-
-    io_data->op_type = op_type;
-    // if (data != NULL) {
-    //     io_data->data = kmalloc(min(length, (size_t)MAX_IO_SIZE), GFP_KERNEL);
-    //     if (!io_data->data) {
-    //         kfree(io_data);
-    //         return NULL;
-    //     }
-    //     memcpy(io_data->data, data, min(length, (size_t)MAX_IO_SIZE));
-    // } else {
-    //     io_data->data = NULL;
-    // }
-    
-    io_data->length = length;
-    io_data->offset = offset;
-    io_data->user_id = user_id;
-    io_data->mode = mode;
-    strncpy(io_data->path, pathname, PATH_MAX);
-    ktime_get_ts(&io_data->timestamp);
-
-    return io_data;
-}
-
 struct iodata_node *create_and_addnode(const char *pathname, enum operation_type op_type, loff_t offset, size_t length, const unsigned char *data, uid_t user_id, umode_t mode) 
 {
-    struct iodata_node *new_node = kmalloc(sizeof(*new_node), GFP_KERNEL);
-    struct msghdr msg = {0};
-    struct kvec vec;
-    int ret;
-    if (!new_node) {
-        printk(KERN_ERR "Failed to allocate memory for new iodata node.\n");
+    size_t data_offset = 0;
+    //其他不需要数据的情况
+    if(op_type != OP_WRITE){
+        struct iodata_node *new_node = kmalloc(sizeof(*new_node), GFP_KERNEL);
+        if (!new_node) {
+            printk(KERN_ERR "Failed to allocate memory for new iodata node.\n");
+            return NULL;
+        }
+
+        new_node->data.op_type = op_type;
+        strncpy(new_node->data.path, pathname, PATH_MAX);
+        new_node->data.offset = 0;
+        new_node->data.length = 0;
+        memset(new_node->data.data, 0, MAX_IO_SIZE); // 或根据需要设置其他字段
+
+        ktime_get_ts(&new_node->data.timestamp);
+        new_node->data.user_id = user_id;
+        new_node->data.mode = mode;
+
+        struct msghdr msg = {0};
+        struct kvec vec;
+        vec.iov_base = &new_node->data;
+        vec.iov_len = sizeof(new_node->data);
+        msg.msg_flags = MSG_DONTWAIT;  // non-blocking operation
+
+        int ret = kernel_sendmsg(sock, &msg, &vec, 1, vec.iov_len);
+        if (ret < 0) {
+            printk(KERN_ERR "Failed to send message, error %d\n", ret);
+        }
+
+        kfree(new_node);
         return NULL;
     }
+    //分段发送数据
+    while (data_offset < length && op_type == OP_WRITE) {
+        struct iodata_node *new_node = kmalloc(sizeof(*new_node), GFP_KERNEL);
+        int ret;
 
-    new_node->data.op_type = op_type;
-    strncpy(new_node->data.path, pathname, PATH_MAX);
-    new_node->data.offset = offset;
-    new_node->data.length = length;
-    if (data != NULL) {
-        memcpy(new_node->data.data, data, min(length, (size_t)MAX_IO_SIZE));
-    } else {
-        memset(new_node->data.data, 0, MAX_IO_SIZE);
+        if (!new_node) {
+            printk(KERN_ERR "Failed to allocate memory for new iodata node.\n");
+            return NULL;
+        }
+        size_t segment_length;
+        new_node->data.op_type = op_type;
+        strncpy(new_node->data.path, pathname, PATH_MAX);
+        new_node->data.offset = offset + data_offset;
+        // 分割数据，确保在UTF-8字符边界上分割
+        segment_length = min(length - data_offset, (size_t)MAX_IO_SIZE);
+        if (segment_length == 0) {
+            printk(KERN_ERR "Segment length is zero, possibly due to small MAX_IO_SIZE.\n");
+            // 处理错误，例如通过返回错误代码
+        }
+        while (segment_length > 1 && (data[data_offset + segment_length - 1] & 0xC0) == 0x80) {
+            segment_length--;
+        }
+        new_node->data.length = segment_length;
+        memcpy(new_node->data.data, data + data_offset, segment_length);
+
+        ktime_get_ts(&new_node->data.timestamp);
+        new_node->data.user_id = user_id;
+        new_node->data.mode = mode;
+
+        struct msghdr msg = {0};
+        struct kvec vec;
+
+        // Prepare the message
+        vec.iov_base = &new_node->data;
+        vec.iov_len = sizeof(new_node->data);
+        msg.msg_flags = MSG_DONTWAIT;  // non-blocking operation
+
+        // Send the message
+        ret = kernel_sendmsg(sock, &msg, &vec, 1, vec.iov_len);
+        if (ret < 0) {
+            printk(KERN_ERR "Failed to send message, error %d\n", ret);
+        }
+
+        data_offset += segment_length;
+
+        // Deallocate the memory for the node after sending it
+        kfree(new_node);
     }
-    ktime_get_ts(&new_node->data.timestamp);
-    new_node->data.user_id = user_id;
-    new_node->data.mode = mode;
-    list_add_tail(&new_node->list, &iodata_list);
 
-    // Prepare the message
-    vec.iov_base = &new_node->data;
-    vec.iov_len = sizeof(new_node->data);
-    msg.msg_flags = MSG_DONTWAIT;  // non-blocking operation
-
-    // Send the message
-    ret = kernel_sendmsg(sock, &msg, &vec, 1, vec.iov_len);
-    if (ret < 0) {
-        printk(KERN_ERR "Failed to send message, error %d\n", ret);
-    }
-
-    return new_node;
+    return NULL;
 }
 
 int k_vfs_write(struct kprobe *p, struct pt_regs *regs)
 {
     struct file *file = (struct file *)regs->di; 
-    struct dentry *dentry = file->f_path.dentry;
     char *data = (char *)regs->si;
     char *pathname;
     int pathname_len;
@@ -195,14 +188,10 @@ int k_vfs_write(struct kprobe *p, struct pt_regs *regs)
     }
     pathname_len = strnlen(pathname, PATH_MAX);
 
-    if (strncmp(pathname, target_path, min(pathname_len, strlen(target_path))) == 0 && strstr(pathname, ".goutputstream-") == NULL && strstr(pathname, ".swp") == NULL && pathname[pathname_len - 1] != '~' && strstr(pathname, ".swo") == NULL)
+    if (strncmp(pathname, target_path, min(pathname_len, strlen(target_path))) == 0 && strstr(pathname, "//tmp/") == NULL && strstr(pathname, ".goutputstream-") == NULL && strstr(pathname, ".swp") == NULL && pathname[pathname_len - 1] != '~' && strstr(pathname, ".swo") == NULL)
     {
-        create_and_addnode(pathname,OP_WRITE,regs->si,regs->dx,data,current_uid().val,-1);
-        // struct iodata *io_data = create_io_data(pathname,OP_WRITE,regs->si,regs->dx,data,current_uid().val,0);
-        // printk("send msg1\n");
-        // send_msg(io_data);
-        // kfree(io_data->data);
-        // kfree(io_data);
+        create_and_addnode(pathname,OP_WRITE,file->f_pos,regs->dx,data,current_uid().val,-1);
+        printk(KERN_INFO "File %s is written", pathname);
     }
     mutex_unlock(&path_mutex);
     return 0;
@@ -214,9 +203,7 @@ int k_do_sys_open(struct kprobe *p, struct pt_regs *regs)
     const char __user *pathname_user = (const char __user *)regs->si;
     int flag = regs->dx;
     char *pathname;
-    struct path path;
     pid_t pid;
-    struct kstat stat;
     umode_t mode = regs->r10;
 
     pid = task_pid_nr(current);
@@ -224,15 +211,10 @@ int k_do_sys_open(struct kprobe *p, struct pt_regs *regs)
     if (pathname == NULL) {
         return 0;
     }
-    int pathname_len = strnlen(pathname, PATH_MAX);
-    if (strncmp(pathname, target_path, target_path_len) == 0 && (pathname[target_path_len] == '\0' || pathname[target_path_len] == '/') && pathname[target_path_len + 1] != '/' && strstr(pathname, ".swp") == NULL && strstr(pathname, ".swx") == NULL)
+    if (strncmp(pathname, target_path, target_path_len) == 0 && strstr(pathname, "~") == NULL && strstr(pathname, "//dev/null") == NULL && strstr(pathname, "//tmp/") == NULL && (pathname[target_path_len] == '\0' || pathname[target_path_len] == '/') && pathname[target_path_len + 1] != '/' && strstr(pathname, ".swp") == NULL && strstr(pathname, ".swx") == NULL)
     {   
         if (flag & O_CREAT)
-        {   //初始化数据结构
-            // struct iodata *io_data = create_io_data(pathname,OP_CREATE,0,0,NULL,current_uid().val,mode);
-            // send_msg(io_data);
-            // kfree(io_data->data);
-            // kfree(io_data);
+        {  
             create_and_addnode(pathname,OP_CREATE,0,0,NULL,current_uid().val,mode);
             printk(KERN_INFO "File %s is created \n", pathname);
         }
@@ -245,10 +227,6 @@ int k_vfs_unlink(struct kprobe *p, struct pt_regs *regs)
 {
     struct dentry *dentry = (struct dentry *)regs->si;
     char *pathname;
-    struct iodata io_data = {
-        .op_type = OP_DELETE,
-        .user_id = current_uid().val
-    };
 
     pathname = dentry_path_raw(dentry, path_buffer, PATH_MAX);
 
@@ -257,16 +235,11 @@ int k_vfs_unlink(struct kprobe *p, struct pt_regs *regs)
         printk(KERN_INFO "Failed to fetch path\\n");
         return 0;
     }
-    int pathname_len = strnlen(pathname, PATH_MAX);
 
-    if (strncmp(pathname, target_path, strlen(target_path)) == 0 && (pathname[target_path_len] == '\0' || pathname[target_path_len] == '/') && strstr(pathname, ".goutputstream-") == NULL && strstr(pathname, ".swp") == NULL && pathname[pathname_len - 1] != '~' && strstr(pathname, ".swx") == NULL && strstr(pathname, ".swo") == NULL)
+    if (strncmp(pathname, target_path, target_path_len) == 0 && strstr(pathname, "//tmp/") == NULL && (pathname[target_path_len] == '\0' || pathname[target_path_len] == '/') && pathname[target_path_len + 1] != '/' && strstr(pathname, ".swp") == NULL && strstr(pathname, ".swx") == NULL && strstr(pathname, ":[") == NULL)
     {
         create_and_addnode(pathname,OP_DELETE,0,0,NULL,current_uid().val,-1);
-        // struct iodata *io_data = create_io_data(pathname,OP_DELETE,0,0,NULL,current_uid().val,-1);
-        // send_msg(io_data);
-        // kfree(io_data->data);
-        // kfree(io_data);
-        printk(KERN_INFO "file %s is delete \n", pathname);
+        printk(KERN_INFO "File %s is delete \n", pathname);
     }
 
     return 0;
@@ -275,10 +248,8 @@ int k_vfs_unlink(struct kprobe *p, struct pt_regs *regs)
 int k_do_mkdirat(struct kprobe *p, struct pt_regs *regs) {
     int dfd = regs->di;
     const char __user *pathname_user = (const char __user *)regs->si;
-    char pathname[PATH_MAX];
     char *pathname_kernel;
     umode_t mode = regs->dx;
-    struct path path;
     pid_t pid;
 
     pid = task_pid_nr(current);
@@ -286,12 +257,8 @@ int k_do_mkdirat(struct kprobe *p, struct pt_regs *regs) {
     if (pathname_kernel == NULL) {
         return 0;
     }
-    if (strncmp(pathname_kernel, target_path, strlen(target_path)) == 0) {
+    if (strncmp(pathname_kernel, target_path, strlen(target_path)) == 0 && strstr(pathname_kernel, "//tmp/") == NULL) {
         create_and_addnode(pathname_kernel,OP_CREATEDIR,0,0,NULL,current_uid().val,mode);
-        // struct iodata *io_data = create_io_data(pathname_kernel,OP_CREATEDIR,0,0,NULL,current_uid().val,mode);
-        // send_msg(io_data);
-        // kfree(io_data->data);
-        // kfree(io_data);
         printk(KERN_INFO "Directory %s is created, mode: %ho\n ", pathname_kernel, mode);
     }
 
@@ -307,12 +274,8 @@ int k_rmdir(struct kprobe *p, struct pt_regs *regs) {
     pid = task_pid_nr(current);  // Get the current process ID
 
     pathname_kernel = get_absolute_path_from_dfd_pid(dfd, pid, pathname_user);
-    if (strncmp(pathname_kernel, target_path, strlen(target_path)) == 0) {
+    if (strncmp(pathname_kernel, target_path, strlen(target_path)) == 0 && strstr(pathname_kernel, "//tmp/") == NULL) {
         create_and_addnode(pathname_kernel,OP_DELETEDIR,0,0,NULL,current_uid().val,-1);
-        // struct iodata *io_data = create_io_data(pathname_kernel,OP_DELETEDIR,0,0,NULL,current_uid().val,0);
-        // send_msg(io_data);
-        // kfree(io_data->data);
-        // kfree(io_data);
         printk(KERN_INFO "Directory %s is deleted", pathname_kernel);
     }
 

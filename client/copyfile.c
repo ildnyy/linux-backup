@@ -7,7 +7,7 @@ void send_file(const char *file_path, int sockfd) {
     char buffer[1024];
 
     // Fill the header information
-    strncpy(header.filename, file_path, MAX_PATH);
+    strncpy(header.filename, file_path, PATH_MAX);
 
     struct stat st;
     stat(file_path, &st);

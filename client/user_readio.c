@@ -1,5 +1,6 @@
 #include "user_readio.h"
 #include "copyfile.h"
+#include "read_cfg.h"
 
 int connect_to_server() {
     struct sockaddr_in server_addr;
@@ -39,22 +40,24 @@ int send_data_to_server(struct iodata data) {
 }
 
 int main(int argc, char *argv[]) {
-    int fd = open("/proc/iodata", O_RDONLY);
-    struct iodata data;
-    ssize_t ret;
+    // struct iodata data;
+    // ssize_t ret;
     FileHeader end_of_transfer;
-    // char *backup_dir_path = "/home/ildnyy/test";
     char backup_dir_path[PATH_MAX];
     if (connect_to_server() == -1) {
         return -1;
     }
 
-    if (argc < 2) {
-        printf("Please provide the backup directory path as a command line argument.\n");
-        return -1;
-    }
-    strncpy(backup_dir_path, argv[1], sizeof(backup_dir_path) - 1);
-    backup_dir_path[sizeof(backup_dir_path) - 1] = '\0';  // Ensure null termination
+    // if (argc < 2) {
+    //     printf("Please provide the backup directory path as a command line argument.\n");
+    //     return -1;
+    // }
+    
+    /*备份目标路径 */
+    // strncpy(backup_dir_path, argv[1], sizeof(backup_dir_path) - 1);
+    // backup_dir_path[sizeof(backup_dir_path) - 1] = '\0';
+
+    read_path("../config.txt",backup_dir_path,sizeof(backup_dir_path));
 
     send_file(backup_dir_path,sockfd);
     traverse_directory_and_send_files(backup_dir_path, sockfd);
@@ -62,21 +65,24 @@ int main(int argc, char *argv[]) {
     strcpy(end_of_transfer.filename, "EOF");
     send(sockfd, &end_of_transfer, sizeof(end_of_transfer), 0);
 
-    // while (1) {
-    //     ret = read(fd, &data, sizeof(data));
-    //     if (ret < sizeof(data)) {
-    //         sleep(1);
-    //         continue;
-    //     }
-    //     send_data_to_server(data);  // 发送数据到服务器
+    /* 使用read系统调用从内核模块中读取数据(速度慢) 
+    int fd = open("/proc/iodata", O_RDONLY);
+    while (1) {
+        ret = read(fd, &data, sizeof(data));
+        if (ret < sizeof(data)) {
+            sleep(1);
+            continue;
+        }
+        send_data_to_server(data);  // 发送数据到服务器
 
-    //     printf("Operation type: %d\n", data.op_type);
-    //     printf("File path is: %s\n", data.path);
-    //     printf("Data: %s\n", data.data);
-    //     printf("uid: %u\n", data.user_id);
-    // }
+        printf("Operation type: %d\n", data.op_type);
+        printf("File path is: %s\n", data.path);
+        printf("Data: %s\n", data.data);
+        printf("uid: %u\n", data.user_id);
+    }
     close(fd);
+    */  
     close(sockfd);
+    
     return 0;
 }
-   

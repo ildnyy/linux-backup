@@ -2,6 +2,10 @@
     "files.associations": {
         "pro_stopio.h": "c",
         "typeinfo": "c",
-        "fcntl.h": "c"
+        "fcntl.h": "c",
+        "unistd.h": "c",
+        "types.h": "c",
+        "data_info.h": "c",
+        "limits.h": "c"
     }
 }

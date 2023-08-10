@@ -1,63 +1,20 @@
-#include <sys/socket.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <sys/select.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <stdio.h>
-#include <fcntl.h>
-#include <signal.h>
-#include <time.h>
-#include <unistd.h>
-#include <string.h>
-#include <stdlib.h>
-
-#define SERVER_IP "0.0.0.0"  // 请替换为你的服务器IP地址
-#define SERVER_PORT 8800  // 请选择合适的端口号
-#define PATH_MAX 256
-#define MAX_PATH 1024
-#define MAX_IO_SIZE 4096
-int first_backup_done = 0;
-volatile sig_atomic_t quit = 0;
-fd_set read_fds;
-struct timeval tv;
-enum operation_type {
-    OP_READ,
-    OP_WRITE,
-    OP_CREATE,
-    OP_DELETE,
-    OP_CREATEDIR,
-    OP_DELETEDIR,
-};
-struct iodata {
-    enum operation_type op_type;  // 操作类型
-    char path[PATH_MAX];         // 文件路径
-    long long offset;            // 写入的偏移量
-    size_t length;               // 写入的长度
-    unsigned char data[MAX_IO_SIZE];      // 写入的数据   
-    struct timespec timestamp;   // 时间戳
-    uid_t user_id;               // 用户ID
-    unsigned int mode;           //权限
-};
-typedef struct {
-    char filename[MAX_PATH];
-    size_t file_size;
-    int is_directory; // 1 if directory, 0 if regular file
-} FileHeader;
+#include "backserver.h"
+#include "log.h"
 
 int replay_io_operation(struct iodata data) {
-    int fd;
     ssize_t ret;
+    FILE *file;
+    size_t written;
     printf("start replay\n");
     switch (data.op_type) {
         case OP_CREATE:
             // 创建文件
-            fd = open(data.path, O_CREAT | O_WRONLY, 0755);
-            if (fd == -1) {
+           file = fopen(data.path, "w");
+            if (file == NULL) {
                 perror("Failed to create file\n");
                 return 0;
             }
-            close(fd);
+            fclose(file);
             break;
         case OP_CREATEDIR: 
             // 创建文件夹
@@ -68,18 +25,24 @@ int replay_io_operation(struct iodata data) {
             break;
         case OP_WRITE:
             // 写入文件
-            fd = open(data.path, O_WRONLY | O_TRUNC);
-            if (fd == -1) {
+            file = fopen(data.path, "r+b"); // 以读/写模式打开，不截断文件
+            if (file == NULL) {
                 perror("Failed to open file for writing\n");
                 return 0;
             }
-            lseek(fd, data.offset, SEEK_SET);
-            ret = write(fd, data.data, data.length);
-            if (ret == -1) {
-                perror("Failed to write file\n");
+            printf("offset: %lld\n", data.offset);
+            if (fseek(file, data.offset, SEEK_SET) == -1){
+                perror("Failed to seek file\n");
+                fclose(file);
                 return 0;
             }
-            close(fd);
+            written = fwrite(data.data, 1, data.length, file);
+            if (written != data.length) {
+                perror("Failed to write file\n");
+                fclose(file);
+                return 0;
+            }
+            fclose(file);
             break;
         case OP_DELETE:
             // 删除文件
@@ -91,7 +54,7 @@ int replay_io_operation(struct iodata data) {
             break;
         case OP_DELETEDIR:
             // 删除文件夹
-            ret = rmdir(data.path);
+            ret = remove_directory(data.path);
             if (ret == -1) {
                 perror("Failed to delete Dir\n");
                 return 0;
@@ -102,6 +65,53 @@ int replay_io_operation(struct iodata data) {
             return 0; 
     }
     return 1;
+}
+
+int remove_directory(const char *path) {
+    DIR *d = opendir(path);
+    size_t path_len = strlen(path);
+    int r = -1;
+
+    if (d) {
+        struct dirent *p;
+        r = 0;
+        while (!r && (p = readdir(d))) {
+            int r2 = -1;
+            char *buf;
+            size_t len;
+
+            if (!strcmp(p->d_name, ".") || !strcmp(p->d_name, "..")) {
+                continue;
+            }
+
+            len = path_len + strlen(p->d_name) + 2;
+            buf = malloc(len);
+
+            if (buf) {
+                struct stat statbuf;
+                snprintf(buf, len, "%s/%s", path, p->d_name);
+
+                if (!stat(buf, &statbuf)) {
+                    if (S_ISDIR(statbuf.st_mode)) {
+                        r2 = remove_directory(buf);
+                    } else {
+                        r2 = unlink(buf);
+                    }
+                }
+
+                free(buf);
+            }
+
+            r = r2;
+        }
+        closedir(d);
+    }
+
+    if (!r) {
+        r = rmdir(path);
+    }
+
+    return r;
 }
 
 void rename_dir(const char *old_dir_path) {
@@ -182,7 +192,7 @@ void receive_file(int sockfd, char *backup_path) {
         return;
     }
     // If it's a directory, create it
-    printf("is_directory, filename %d %s\n",header.is_directory,header.filename);
+    printf("is_directory:%d, filename:%s\n",header.is_directory,header.filename);
     if (header.is_directory) {
         mkdir(header.filename, 0755);
     } else {
@@ -216,9 +226,7 @@ int main() {
     struct sockaddr_in server_addr, client_addr;
     socklen_t client_addr_len = sizeof(client_addr);
     struct iodata data;
-    ssize_t ret;
-    char backup_path[MAX_PATH];
-    char backup_dir_path[MAX_PATH];
+    char backup_path[PATH_MAX];
 
     signal(SIGINT, signal_handler);
     // 创建监听套接字
@@ -241,7 +249,7 @@ int main() {
     }
 
     // 开始监听连接请求
-    if (listen(listen_sock, 5) == -1) {  // 最多允许5个待处理的连接
+    if (listen(listen_sock, 5) == -1) { 
         perror("Failed to listen on socket");
         close(listen_sock);
         return -1;
@@ -252,14 +260,22 @@ int main() {
     client_sock = accept(listen_sock, (struct sockaddr *)&client_addr, &client_addr_len);
     if (client_sock == -1) {
         perror("Failed to accept client connection");
-    }
+    }   
 
     printf("Accepted connection from %s:%d\n", inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
 
     while (1) {
         receive_file(client_sock, backup_path);
         if (first_backup_done){
-            printf("全备完成");
+            printf("全备完成\n");
+            char backup_copy_path[PATH_MAX];
+            strcpy(backup_copy_path, backup_path);
+            strcat(backup_copy_path, "_copy");
+            if (copy_item(backup_path, backup_copy_path) == 0) {
+                printf("副本保存成功\n");
+            } else {
+                printf("副本保存失败\n");
+            }
             break;
         }
     }
@@ -271,8 +287,8 @@ int main() {
     }
 
     printf("Accepted connection from %s:%d\n", inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
+    //实时接收数据
     while (!quit && first_backup_done) {
-        // 从客户端接收数据
         FD_ZERO(&read_fds);
         FD_SET(client_sock, &read_fds);
         tv.tv_sec = 1;  // timeout after 1 second
@@ -285,14 +301,13 @@ int main() {
         if (activity < 0) {
             perror("select error");
         } else if (activity == 0) {
-            // timeout, no data available
             continue;
         } else {
             if (FD_ISSET(client_sock, &read_fds)) {
                 // 从客户端接收数据
                 ssize_t received_bytes = recv_all(client_sock, &data, sizeof(data));
                 if (received_bytes == sizeof(data)) {
-                    printf("receiving...\n");
+                    write_log(data);
                     // 处理接收到的数据
                     int flag = replay_io_operation(data);
                     if(flag){
@@ -310,7 +325,6 @@ int main() {
     }
     close(client_sock);
     close(listen_sock);
-    printf("%s\n",backup_path);
     rename_dir(backup_path);
     return 0;
 }
