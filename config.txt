@@ -1,7 +1,11 @@
 Year: 2023
 Month: 8
-Day: 10
-Hour: 10
+Day: 15
+Hour: 17
 Minute: 30
 Second: 0
 target_path: "/home/ildnyy/test"
+BACKUP_SERVER_IP:172.18.44.10  
+BACKUP_SERVER_PORT:8800
+HOST_SERVER_IP:172.18.44.9
+HOST_SERVER_PORT:8800

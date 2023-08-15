@@ -32,4 +32,10 @@ struct iodata {
     unsigned int mode;           //权限
 };
 
+typedef struct {
+    char filename[PATH_MAX];
+    size_t file_size;
+    int is_directory; // 1 if directory, 0 if regular file
+} FileHeader;
+
 #endif

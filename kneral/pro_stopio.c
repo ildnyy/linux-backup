@@ -89,6 +89,9 @@ struct iodata_node *create_and_addnode(const char *pathname, enum operation_type
     //其他不需要数据的情况
     if(op_type != OP_WRITE){
         struct iodata_node *new_node = kmalloc(sizeof(*new_node), GFP_KERNEL);
+        struct msghdr msg;
+        struct kvec vec;
+        int ret;
         if (!new_node) {
             printk(KERN_ERR "Failed to allocate memory for new iodata node.\n");
             return NULL;
@@ -104,13 +107,12 @@ struct iodata_node *create_and_addnode(const char *pathname, enum operation_type
         new_node->data.user_id = user_id;
         new_node->data.mode = mode;
 
-        struct msghdr msg = {0};
-        struct kvec vec;
+        memset(&msg, 0, sizeof(msg)); 
         vec.iov_base = &new_node->data;
         vec.iov_len = sizeof(new_node->data);
         msg.msg_flags = MSG_DONTWAIT;  // non-blocking operation
 
-        int ret = kernel_sendmsg(sock, &msg, &vec, 1, vec.iov_len);
+        ret = kernel_sendmsg(sock, &msg, &vec, 1, vec.iov_len);
         if (ret < 0) {
             printk(KERN_ERR "Failed to send message, error %d\n", ret);
         }
@@ -122,12 +124,13 @@ struct iodata_node *create_and_addnode(const char *pathname, enum operation_type
     while (data_offset < length && op_type == OP_WRITE) {
         struct iodata_node *new_node = kmalloc(sizeof(*new_node), GFP_KERNEL);
         int ret;
-
+        size_t segment_length;
+        struct msghdr msg;
+        struct kvec vec;
         if (!new_node) {
             printk(KERN_ERR "Failed to allocate memory for new iodata node.\n");
             return NULL;
         }
-        size_t segment_length;
         new_node->data.op_type = op_type;
         strncpy(new_node->data.path, pathname, PATH_MAX);
         new_node->data.offset = offset + data_offset;
@@ -147,9 +150,7 @@ struct iodata_node *create_and_addnode(const char *pathname, enum operation_type
         new_node->data.user_id = user_id;
         new_node->data.mode = mode;
 
-        struct msghdr msg = {0};
-        struct kvec vec;
-
+        memset(&msg, 0, sizeof(msg));
         // Prepare the message
         vec.iov_base = &new_node->data;
         vec.iov_len = sizeof(new_node->data);
@@ -188,7 +189,7 @@ int k_vfs_write(struct kprobe *p, struct pt_regs *regs)
     }
     pathname_len = strnlen(pathname, PATH_MAX);
 
-    if (strncmp(pathname, target_path, min(pathname_len, strlen(target_path))) == 0 && strstr(pathname, "//tmp/") == NULL && strstr(pathname, ".goutputstream-") == NULL && strstr(pathname, ".swp") == NULL && pathname[pathname_len - 1] != '~' && strstr(pathname, ".swo") == NULL)
+    if (strncmp(pathname, target_path, target_path_len) == 0 && strstr(pathname, "//") == NULL && strstr(pathname, ".goutputstream-") == NULL && strstr(pathname, ".swp") == NULL && pathname[target_path_len] == '/' && strstr(pathname, ".swo") == NULL)
     {
         create_and_addnode(pathname,OP_WRITE,file->f_pos,regs->dx,data,current_uid().val,-1);
         printk(KERN_INFO "File %s is written", pathname);
@@ -211,7 +212,7 @@ int k_do_sys_open(struct kprobe *p, struct pt_regs *regs)
     if (pathname == NULL) {
         return 0;
     }
-    if (strncmp(pathname, target_path, target_path_len) == 0 && strstr(pathname, "~") == NULL && strstr(pathname, "//dev/null") == NULL && strstr(pathname, "//tmp/") == NULL && (pathname[target_path_len] == '\0' || pathname[target_path_len] == '/') && pathname[target_path_len + 1] != '/' && strstr(pathname, ".swp") == NULL && strstr(pathname, ".swx") == NULL)
+    if (strncmp(pathname, target_path, target_path_len) == 0 && strstr(pathname, "/4913") == NULL &&strstr(pathname, "~") == NULL && strstr(pathname, "//") == NULL && (pathname[target_path_len] == '\0' || pathname[target_path_len] == '/') && strstr(pathname, ".swp") == NULL && strstr(pathname, ".swx") == NULL)
     {   
         if (flag & O_CREAT)
         {  
@@ -236,7 +237,7 @@ int k_vfs_unlink(struct kprobe *p, struct pt_regs *regs)
         return 0;
     }
 
-    if (strncmp(pathname, target_path, target_path_len) == 0 && strstr(pathname, "//tmp/") == NULL && (pathname[target_path_len] == '\0' || pathname[target_path_len] == '/') && pathname[target_path_len + 1] != '/' && strstr(pathname, ".swp") == NULL && strstr(pathname, ".swx") == NULL && strstr(pathname, ":[") == NULL)
+    if (strncmp(pathname, target_path, target_path_len) == 0 && strstr(pathname, "/4913") == NULL && strstr(pathname, "~") == NULL && strstr(pathname, "//") == NULL && (pathname[target_path_len] == '\0' || pathname[target_path_len] == '/')  && strstr(pathname, ".swp") == NULL && strstr(pathname, ".swx") == NULL && strstr(pathname, ":[") == NULL)
     {
         create_and_addnode(pathname,OP_DELETE,0,0,NULL,current_uid().val,-1);
         printk(KERN_INFO "File %s is delete \n", pathname);
@@ -257,7 +258,7 @@ int k_do_mkdirat(struct kprobe *p, struct pt_regs *regs) {
     if (pathname_kernel == NULL) {
         return 0;
     }
-    if (strncmp(pathname_kernel, target_path, strlen(target_path)) == 0 && strstr(pathname_kernel, "//tmp/") == NULL) {
+    if (strncmp(pathname_kernel, target_path, strlen(target_path)) == 0 && pathname_kernel[target_path_len] == '/' && strstr(pathname_kernel, "//") == NULL) {
         create_and_addnode(pathname_kernel,OP_CREATEDIR,0,0,NULL,current_uid().val,mode);
         printk(KERN_INFO "Directory %s is created, mode: %ho\n ", pathname_kernel, mode);
     }
@@ -274,7 +275,7 @@ int k_rmdir(struct kprobe *p, struct pt_regs *regs) {
     pid = task_pid_nr(current);  // Get the current process ID
 
     pathname_kernel = get_absolute_path_from_dfd_pid(dfd, pid, pathname_user);
-    if (strncmp(pathname_kernel, target_path, strlen(target_path)) == 0 && strstr(pathname_kernel, "//tmp/") == NULL) {
+    if (strncmp(pathname_kernel, target_path, strlen(target_path)) == 0 && pathname_kernel[target_path_len] == '/' && strstr(pathname_kernel, "//") == NULL) {
         create_and_addnode(pathname_kernel,OP_DELETEDIR,0,0,NULL,current_uid().val,-1);
         printk(KERN_INFO "Directory %s is deleted", pathname_kernel);
     }

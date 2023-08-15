@@ -8,15 +8,21 @@ CFLAGS = -Wall -g
 INCLUDES = -I../include
 
 # 源文件列表
-SOURCES = backserver.c  ../log/log.c
+COMMON_SOURCES = ../log/log.c ../config/read_cfg.c 
+BACKSERVER_SOURCES = backserver.c $(COMMON_SOURCES)  file_trans.c
+CLIENT_SOURCES = restore.c $(COMMON_SOURCES) ../client/copyfile.c
 
 # 目标可执行文件名
-TARGET = backserver
+BACKSERVER_TARGET = backserver
+CLIENT_TARGET = restore
 
-all: $(TARGET)
+all: $(BACKSERVER_TARGET) $(CLIENT_TARGET)
 
-$(TARGET): $(SOURCES)
-	$(CC) $(CFLAGS) $(INCLUDES) $(SOURCES) -o $(TARGET)
+$(BACKSERVER_TARGET): $(BACKSERVER_SOURCES)
+	$(CC) $(CFLAGS) $(INCLUDES) $(BACKSERVER_SOURCES) -o $(BACKSERVER_TARGET)
+
+$(CLIENT_TARGET): $(CLIENT_SOURCES)
+	$(CC) $(CFLAGS) $(INCLUDES) $(CLIENT_SOURCES) -o $(CLIENT_TARGET)
 
 clean:
-	rm -f $(TARGET)
+	rm -f $(BACKSERVER_TARGET) $(CLIENT_TARGET)

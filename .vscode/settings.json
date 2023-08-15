@@ -6,6 +6,10 @@
         "unistd.h": "c",
         "types.h": "c",
         "data_info.h": "c",
-        "limits.h": "c"
+        "limits.h": "c",
+        "file_trans.h": "c",
+        "array": "c",
+        "string": "c",
+        "string_view": "c"
     }
 }

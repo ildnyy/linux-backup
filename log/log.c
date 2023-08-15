@@ -1,12 +1,18 @@
 #include "log.h"
 
-void write_log(struct iodata data)
+void write_log(struct iodata data, char *backup_path)
 {
     // 打开日志文件
     FILE* log_file = fopen("log_file.txt", "a");
     if (log_file != NULL) {
         // 写入时间戳和其他字段（在同一行）
-        strcat(data.path, "_copy");
+        char *found_position = strstr(data.path, backup_path);
+        if (found_position) {
+            char modified_path[512];  // 可能需要调整大小
+            int position = found_position - data.path + strlen(backup_path);
+            snprintf(modified_path, sizeof(modified_path), "%.*s_copy%s", position, data.path, data.path + position);
+            strncpy(data.path, modified_path, sizeof(data.path) - 1);
+        }
         fprintf(log_file, "Timestamp: %ld.%ld Operation Type: %d Path: %s Offset: %lld Length: %zu User ID: %d Mode: %u\nData: ",
                 data.timestamp.tv_sec, data.timestamp.tv_nsec, data.op_type, data.path, data.offset, data.length, data.user_id, data.mode);
 
@@ -15,23 +21,22 @@ void write_log(struct iodata data)
             fprintf(log_file, "%02x ", data.data[i]);
         }
 
-        fprintf(log_file, "\n\n"); // 两个换行符以便于阅读
+        fprintf(log_file, "\n"); 
         fclose(log_file);
     }
 }; 
 
 int read_log(FILE *log_file, struct iodata* data) {
+    // 检查文件是否打开
     if (log_file == NULL) {
         perror("Error opening log file.\n");
         return -1;
     }
+    int ret;
 
     // 读取时间戳和其他字段（从同一行）
-    if (fscanf(log_file, "Timestamp: %ld.%ld Operation Type: %d Path: %s Offset: %lld Length: %zu User ID: %d Mode: %u\n",
-               &data->timestamp.tv_sec, &data->timestamp.tv_nsec, (int*)&data->op_type, data->path, &data->offset, &data->length, &data->user_id, &data->mode) != 8) {
-        fprintf(stderr, "Error reading log line.\n");
-        return -1;
-    }
+    ret = fscanf(log_file, "Timestamp: %ld.%ld Operation Type: %d Path: %[^ ] Offset: %lld Length: %zu User ID: %d Mode: %u\nData: ",
+                 &data->timestamp.tv_sec, &data->timestamp.tv_nsec, (int*)&data->op_type, data->path, &data->offset, &data->length, &data->user_id, &data->mode);
 
     // 读取数据 
     for(size_t i = 0; i < data->length; i++) {
@@ -40,10 +45,21 @@ int read_log(FILE *log_file, struct iodata* data) {
             fprintf(stderr, "Error reading data.\n");
             return -1;
         }
-        data->data[i] = byte;
+        data->data[i] = (unsigned char)byte;
     }
-    return 0;
+    //打印读取数据
+    printf("Timestamp: %ld.%ld Operation Type: %d Path: %s Offset: %lld Length: %zu User ID: %d Mode: %u\nData: %s",
+           data->timestamp.tv_sec, data->timestamp.tv_nsec, data->op_type, data->path, data->offset, data->length, data->user_id, data->mode,data->data);
+    // 在数据读取循环之后
+    // 读取并跳过所有的空格和换行符，直到下一行
+    char ch;
+    do {
+        ch = fgetc(log_file);
+    } while (isspace(ch));
+    ungetc(ch, log_file);  // 将最后一个非空白字符放回到输入流，以供下一次读取使用
+    return 0;  // 成功读取
 }
+
 
 int copy_file(const char *source_path, const char *destination_path) {
     FILE *source_file = fopen(source_path, "rb");

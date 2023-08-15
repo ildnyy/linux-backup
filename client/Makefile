@@ -8,7 +8,7 @@ CFLAGS = -Wall -g
 INCLUDES = -I../include
 
 # 源文件列表
-SOURCES = copyfile.c user_readio.c ../config/read_cfg.c
+SOURCES = copyfile.c user_readio.c ../config/read_cfg.c ../backserver/file_trans.c
 
 # 目标可执行文件名
 TARGET = client
